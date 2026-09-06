@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import requests
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -45,9 +46,10 @@ def save_memory(item):
 def check_ktu(driver, memory):
     print("\n--- Checking KTU Announcements ---")
     driver.get('https://ktu.edu.in/Menu/announcements')
-    driver.implicitly_wait(8)
+    time.sleep(10)  # hard wait for JS-rendered announcement cards to appear
 
     buttons = driver.find_elements(By.TAG_NAME, 'button')
+    print(f"(debug) {len(buttons)} <button> elements found on KTU page")
     updates_found = False
 
     for btn in buttons:
@@ -76,9 +78,10 @@ def check_ktu(driver, memory):
 def check_gec(driver, memory):
     print("\n--- Checking GEC News ---")
     driver.get('https://gectcr.ac.in/all-news')
-    driver.implicitly_wait(5)
+    time.sleep(6)  # hard wait for JS-rendered content to appear
 
     links = driver.find_elements(By.TAG_NAME, 'a')
+    print(f"(debug) {len(links)} <a> elements found on GEC page")
     updates_found = False
 
     # --- SPAM LIMITER ---
