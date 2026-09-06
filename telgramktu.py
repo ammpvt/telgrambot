@@ -81,32 +81,34 @@ def check_gec(driver, memory):
     time.sleep(6)  # hard wait for JS-rendered content to appear
 
     links = driver.find_elements(By.TAG_NAME, 'a')
-    print(f"(debug) {len(links)} <a> elements found on GEC page")
-    updates_found = False
 
-    # --- SPAM LIMITER ---
-    # Only allow a maximum of 5 GEC messages per run
-    messages_sent_this_run = 0
-
+    # Collect only PDF links, preserving the order they appear on the page
+    # (the site lists newest first, so position in this list = recency)
+    pdf_links = []
     for a in links:
-        if messages_sent_this_run >= 5:
-            print("Reached maximum limit of 5 new GEC updates for this run to prevent spam.")
-            break
+        href = a.get_attribute('href')
+        if href and '.pdf' in href.lower():
+            pdf_links.append(href)
 
-        link_url = a.get_attribute('href')
-        if link_url and '.pdf' in link_url.lower():
-            if link_url not in memory:
-                raw_filename = link_url.split('/')[-1]
-                clean_title = re.sub(r'^\d+_', '', raw_filename).replace('.pdf', '').replace('_', ' ')
+    # Only ever consider the most recent 5 items on the page.
+    # We deliberately never look further down the list, so there's no
+    # older backlog to slowly drain out over future runs.
+    latest_five = pdf_links[:5]
+    print(f"(debug) {len(pdf_links)} total PDF links on page, checking latest {len(latest_five)}")
 
-                print(f"GEC Update: {clean_title}")
-                msg = f"🏛️ <b>New GEC Thrissur Update</b> 🏛️\n\n<b>{clean_title}</b>\n\n🔗 <a href='{link_url}'>Click to view PDF</a>"
-                send_telegram_message(msg)
+    updates_found = False
+    for link_url in latest_five:
+        if link_url not in memory:
+            raw_filename = link_url.split('/')[-1]
+            clean_title = re.sub(r'^\d+_', '', raw_filename).replace('.pdf', '').replace('_', ' ')
 
-                save_memory(link_url)
-                memory.append(link_url)
-                updates_found = True
-                messages_sent_this_run += 1
+            print(f"GEC Update: {clean_title}")
+            msg = f"🏛️ <b>New GEC Thrissur Update</b> 🏛️\n\n<b>{clean_title}</b>\n\n🔗 <a href='{link_url}'>Click to view PDF</a>"
+            send_telegram_message(msg)
+
+            save_memory(link_url)
+            memory.append(link_url)
+            updates_found = True
 
     if not updates_found:
         print("No new GEC announcements.")
