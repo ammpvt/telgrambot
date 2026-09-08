@@ -52,24 +52,34 @@ def check_ktu(driver, memory):
     print(f"(debug) {len(buttons)} <button> elements found on KTU page")
     updates_found = False
 
+    candidate_buttons = 0
     for btn in buttons:
         btn_text = btn.text.strip().lower()
         if 'notification' in btn_text or 'order' in btn_text or 'download' in btn_text:
+            candidate_buttons += 1
             try:
                 card = btn.find_element(By.XPATH, "./../..")
                 title = card.text.split('\n')[0].strip()
                 if len(title) < 15:
                     title = btn.find_element(By.XPATH, "./../../..").text.split('\n')[0].strip()
 
-                if len(title) > 15 and title not in memory:
+                # Log every candidate title regardless of memory state, so we can
+                # see exactly what's being extracted and why it is/isn't sent.
+                already_seen = title in memory
+                print(f"(debug) candidate title='{title}' | len={len(title)} | already_in_memory={already_seen}")
+
+                if len(title) > 15 and not already_seen:
                     print(f"KTU Update: {title}")
                     msg = f"🚨 <b>New KTU Announcement</b> 🚨\n\n<b>{title}</b>\n\n🔗 <a href='https://ktu.edu.in/Menu/announcements'>Visit KTU to download</a>"
                     send_telegram_message(msg)
                     save_memory(title)
                     memory.append(title)
                     updates_found = True
-            except Exception:
-                pass
+            except Exception as e:
+                # Log failures instead of silently swallowing them
+                print(f"(debug) FAILED to extract title from a candidate button: {e}")
+
+    print(f"(debug) {candidate_buttons} candidate buttons matched keyword filter (of {len(buttons)} total buttons)")
 
     if not updates_found:
         print("No new KTU announcements.")
