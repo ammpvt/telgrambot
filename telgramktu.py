@@ -38,18 +38,26 @@ def load_memory():
         resp.raise_for_status()
         data = resp.json()
         # data is a list of first-column values from the sheet; clean it up
-        return [str(item).strip() for item in data if item]
+        mem = [str(item).strip() for item in data if item]
+        print(f"(debug) Loaded {len(mem)} items from memory sheet")
+        if mem:
+            print(f"(debug) Sample of loaded memory (first 3): {mem[:3]}")
+        return mem
     except Exception as e:
-        print(f"Could not load memory from Sheet (continuing with empty memory this run): {e}")
+        print(f"(debug) COULD NOT load memory from Sheet — treating as EMPTY this run: {e}")
         return []
 
 
 def save_memory(item):
-    """Appends a new item to the Google Sheet (via Apps Script POST)."""
+    """Appends a new item to the Google Sheet (via Apps Script POST). Returns True if the write appears to have succeeded."""
     try:
-        requests.post(SHEET_URL, data={'item': item}, timeout=20)
+        resp = requests.post(SHEET_URL, data={'item': item}, timeout=20)
+        resp.raise_for_status()
+        print(f"(debug) Sheet write response: {resp.text[:200]!r}")
+        return True
     except Exception as e:
-        print(f"Could not save memory to Sheet: {e}")
+        print(f"(debug) COULD NOT save to Sheet — this item will look 'new' again next run: {e}")
+        return False
 
 
 def check_ktu(driver, memory):
@@ -57,40 +65,50 @@ def check_ktu(driver, memory):
     driver.get('https://ktu.edu.in/Menu/announcements')
     time.sleep(10)  # hard wait for JS-rendered announcement cards to appear
 
-    buttons = driver.find_elements(By.TAG_NAME, 'button')
-    print(f"(debug) {len(buttons)} <button> elements found on KTU page")
+    # Each announcement is one div.col-sm-11, containing an h6 title and a
+    # themed date div. This is far more reliable than the old approach of
+    # looping over buttons and guessing a title by climbing up the DOM —
+    # that broke on cards with multiple buttons (counted the same card
+    # 2-3 times) and sometimes grabbed the wrong "first line" as the title.
+    cards = driver.find_elements(By.CSS_SELECTOR, "div.col-sm-11")
+    print(f"(debug) {len(cards)} announcement cards found on KTU page")
     updates_found = False
 
-    candidate_buttons = 0
-    for btn in buttons:
-        btn_text = btn.text.strip().lower()
-        if 'notification' in btn_text or 'order' in btn_text or 'download' in btn_text:
-            candidate_buttons += 1
-            try:
-                card = btn.find_element(By.XPATH, "./../..")
-                title = card.text.split('\n')[0].strip()
-                if len(title) < 15:
-                    title = btn.find_element(By.XPATH, "./../../..").text.split('\n')[0].strip()
+    for card in cards:
+        try:
+            title_el = card.find_elements(By.CSS_SELECTOR, "h6.f-w-bold")
+            if not title_el:
+                continue  # not every col-sm-11 on the page is an announcement card
+            title = title_el[0].text.strip()
 
-                # Log every candidate title regardless of memory state, so we can
-                # see exactly what's being extracted and why it is/isn't sent.
-                already_seen = title in memory
-                print(f"(debug) candidate title='{title}' | len={len(title)} | already_in_memory={already_seen}")
+            date_text = ""
+            date_el = card.find_elements(By.CSS_SELECTOR, "div.font-14.text-theme.h6.m-t-10.f-w-bold")
+            if date_el:
+                date_text = date_el[0].text.strip()
 
-                if len(title) > 15 and not already_seen:
-                    print(f"KTU Update: {title}")
-                    msg = f"🚨 <b>New KTU Announcement</b> 🚨\n\n<b>{title}</b>\n\n🔗 <a href='https://ktu.edu.in/Menu/announcements'>Visit KTU to download</a>"
-                    if send_telegram_message(msg):
-                        save_memory(title)
-                        memory.append(title)
+            # Composite key: date + heading, far more robust than title alone.
+            key = f"{date_text} | {title}" if date_text else title
+
+            # Backward-compatible check: recognize items saved under the OLD
+            # title-only memory format too, so switching key formats doesn't
+            # cause everything currently on the page to look "new" again.
+            already_seen = (key in memory) or (title in memory)
+            print(f"(debug) candidate: date='{date_text}' title='{title}' | already_in_memory={already_seen}")
+
+            if title and not already_seen:
+                print(f"KTU Update: {key}")
+                msg = f"🚨 <b>New KTU Announcement</b> 🚨\n\n<b>{title}</b>\n🗓️ {date_text}\n\n🔗 <a href='https://ktu.edu.in/Menu/announcements'>Visit KTU to download</a>"
+                if send_telegram_message(msg):
+                    saved = save_memory(key)
+                    if saved:
+                        memory.append(key)
                         updates_found = True
                     else:
-                        print(f"(debug) NOT saving to memory since delivery failed — will retry next run: {title}")
-            except Exception as e:
-                # Log failures instead of silently swallowing them
-                print(f"(debug) FAILED to extract title from a candidate button: {e}")
-
-    print(f"(debug) {candidate_buttons} candidate buttons matched keyword filter (of {len(buttons)} total buttons)")
+                        print(f"(debug) Save failed — will be retried next run: {key}")
+                else:
+                    print(f"(debug) NOT saving to memory since delivery failed — will retry next run: {key}")
+        except Exception as e:
+            print(f"(debug) FAILED to process a candidate card: {e}")
 
     if not updates_found:
         print("No new KTU announcements.")
@@ -119,16 +137,22 @@ def check_gec(driver, memory):
 
     updates_found = False
     for link_url in latest_five:
-        if link_url not in memory:
+        already_seen = link_url in memory
+        print(f"(debug) candidate URL='{link_url}' | already_in_memory={already_seen}")
+
+        if not already_seen:
             raw_filename = link_url.split('/')[-1]
             clean_title = re.sub(r'^\d+_', '', raw_filename).replace('.pdf', '').replace('_', ' ')
 
             print(f"GEC Update: {clean_title}")
             msg = f"🏛️ <b>New GEC Thrissur Update</b> 🏛️\n\n<b>{clean_title}</b>\n\n🔗 <a href='{link_url}'>Click to view PDF</a>"
             if send_telegram_message(msg):
-                save_memory(link_url)
-                memory.append(link_url)
-                updates_found = True
+                saved = save_memory(link_url)
+                if saved:
+                    memory.append(link_url)
+                    updates_found = True
+                else:
+                    print(f"(debug) Save failed — NOT adding to in-run memory either, so this will be retried next run")
             else:
                 print(f"(debug) NOT saving to memory since delivery failed — will retry next run: {clean_title}")
 
