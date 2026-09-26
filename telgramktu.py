@@ -63,6 +63,13 @@ def check_ktu(driver, memory):
     driver.get('https://ktu.edu.in/Menu/announcements')
     time.sleep(10)  # hard wait for JS-rendered announcement cards to appear
 
+    print(f"(debug) KTU page title: {driver.title!r}")
+    try:
+        body_text_len = len(driver.find_element(By.TAG_NAME, 'body').text)
+        print(f"(debug) KTU page body text length: {body_text_len} characters")
+    except Exception as e:
+        print(f"(debug) Could not read page body at all: {e}")
+
     # Each announcement is one div.col-sm-11, containing an h6 title and a
     # themed date div. This is far more reliable than the old approach of
     # looping over buttons and guessing a title by climbing up the DOM —
