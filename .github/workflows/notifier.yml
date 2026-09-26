@@ -18,11 +18,15 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
-
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          pip install -r requirements.txt
+      
       - name: Run bot
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SHEET_WEBAPP_URL: ${{ secrets.SHEET_WEBAPP_URL }}
-        run: python telgramktu.py
+        # xvfb-run creates a fake monitor so Chrome doesn't know it's in a server
+        run: xvfb-run python telgramktu.py
