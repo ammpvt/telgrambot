@@ -61,7 +61,18 @@ def save_memory(item):
 def check_ktu(driver, memory):
     print("\n--- Checking KTU Announcements ---")
     driver.get('https://ktu.edu.in/Menu/announcements')
-    time.sleep(10)  # hard wait for JS-rendered announcement cards to appear
+
+    # Actively wait (up to 20s) for real announcement content to render,
+    # instead of a blind fixed sleep — gives slow JS renders more of a
+    # chance, while still failing fast if content genuinely never appears.
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    try:
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "h6.f-w-bold"))
+        )
+    except Exception:
+        print("(debug) No h6.f-w-bold appeared within 20s wait")
 
     print(f"(debug) KTU page title: {driver.title!r}")
     try:
@@ -172,11 +183,30 @@ def run_once():
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-gpu')
     options.add_argument('--ignore-certificate-errors')
-    options.add_experimental_option('excludeSwitches', ['enable-logging'])
+    options.add_experimental_option('excludeSwitches', ['enable-logging', 'enable-automation'])
+    options.add_experimental_option('useAutomationExtension', False)
+    # Selenium's default headless Chrome has a well-known automation fingerprint
+    # (navigator.webdriver = true, sometimes "HeadlessChrome" in the user-agent).
+    # Some sites serve a stripped-down/blocked page when they detect this. These
+    # two lines make the browser look like an ordinary desktop Chrome instead.
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_argument(
+        'user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+        '(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
+    )
 
     browser = None
     try:
         browser = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+
+        # Further hide the automation fingerprint: Selenium normally exposes
+        # navigator.webdriver = true, which some sites check for directly.
+        try:
+            browser.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+                'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
+            })
+        except Exception as e:
+            print(f"(debug) Could not apply webdriver-masking script (non-fatal): {e}")
 
         try:
             current_memory = load_memory()
