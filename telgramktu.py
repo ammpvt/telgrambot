@@ -12,7 +12,7 @@ from selenium.webdriver.common.by import By
 # --- CONFIGURATION (read from environment variables / GitHub Secrets) ---
 TOKEN = os.environ['TELEGRAM_TOKEN']
 CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
-SHEET_URL = os.environ['SHEET_WEBAPP_URL']  # Your Apps Script deployed Web App URL
+SHEET_URL = os.environ['SHEET_WEBAPP_URL']
 
 
 def send_telegram_message(text):
@@ -35,8 +35,6 @@ def load_memory():
     data = resp.json()
     mem = [str(item).strip() for item in data if item]
     print(f"(debug) Loaded {len(mem)} items from memory sheet")
-    if mem:
-        print(f"(debug) Sample of loaded memory (first 3): {mem[:3]}")
     return mem
 
 
@@ -44,48 +42,74 @@ def save_memory(item):
     try:
         resp = requests.post(SHEET_URL, data={'item': item}, timeout=20)
         resp.raise_for_status()
-        print(f"(debug) Sheet write response: {resp.text[:200]!r}")
         return True
     except Exception as e:
         print(f"(debug) COULD NOT save to Sheet — this item will look 'new' again next run: {e}")
         return False
 
 
+def get_free_proxies():
+    """Fetches a fresh list of free HTTP proxies that support HTTPS destinations."""
+    print("(debug) Fetching free proxies from ProxyScrape...")
+    try:
+        url = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=yes&anonymity=all"
+        resp = requests.get(url, timeout=10)
+        # splitlines() handles both \n and \r\n cleanly
+        proxies = [p.strip() for p in resp.text.splitlines() if p.strip()]
+        print(f"(debug) Fetched {len(proxies)} proxies.")
+        return proxies
+    except Exception as e:
+        print(f"(debug) Failed to fetch proxy list: {e}")
+        return []
+
+
 def check_ktu(memory):
-    print("\n--- Checking KTU Announcements (via requests) ---")
+    print("\n--- Checking KTU Announcements (via free proxies) ---")
     
-    # Heavily spoofed headers to look like a standard desktop Chrome browser
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
         'Connection': 'keep-alive',
         'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1'
     }
     
-    try:
-        resp = requests.get('https://ktu.edu.in/Menu/announcements', headers=headers, timeout=20)
-        print(f"(debug) KTU HTTP status: {resp.status_code}")
-        html_content = resp.text
-        print(f"(debug) KTU HTML length: {len(html_content)} characters")
-        
-        # If the length is still ~214 characters, we are hitting a WAF IP block.
-        if len(html_content) < 1000:
-            print(f"(debug) Page seems too small, likely blocked by firewall. Content snippet: {html_content[:300]}")
-            return
-            
-    except Exception as e:
-        print(f"(debug) KTU request failed: {e}")
+    proxies_list = get_free_proxies()
+    if not proxies_list:
+        print("(debug) No proxies available. Skipping KTU this run.")
         return
 
-    # Parse the raw HTML directly without a browser
+    html_content = ""
+    
+    # Try up to 10 proxies max so the GitHub Action doesn't run forever
+    for proxy_ip in proxies_list[:10]:
+        print(f"(debug) Trying proxy: {proxy_ip}")
+        proxies = {
+            "http": f"http://{proxy_ip}",
+            "https": f"http://{proxy_ip}"
+        }
+        try:
+            # 10s timeout: free proxies are slow, but if it takes longer than 10s it's probably dead
+            resp = requests.get('https://ktu.edu.in/Menu/announcements', headers=headers, proxies=proxies, timeout=10)
+            
+            # A real page is ~40k+ chars. If it's > 5000, we successfully bypassed the firewall
+            if resp.status_code == 200 and len(resp.text) > 5000:
+                print(f"(debug) -> SUCCESS! Proxy {proxy_ip} worked. HTML length: {len(resp.text)}")
+                html_content = resp.text
+                break
+            else:
+                print(f"(debug) -> Proxy connected but returned blocked page (length: {len(resp.text)})")
+        except Exception as e:
+            # We expect a LOT of these. 
+            print(f"(debug) -> Proxy failed: {type(e).__name__}")
+            
+    if not html_content:
+        print("(debug) All attempted proxies failed or were blocked. Will try again next run.")
+        return
+
     soup = BeautifulSoup(html_content, 'html.parser')
     cards = soup.select("div.col-sm-11")
-    print(f"(debug) {len(cards)} announcement cards found on KTU page via requests")
+    print(f"(debug) {len(cards)} announcement cards found on KTU page")
     
     updates_found = False
 
@@ -127,7 +151,7 @@ def check_ktu(memory):
 def check_gec(driver, memory):
     print("\n--- Checking GEC News ---")
     driver.get('https://gectcr.ac.in/all-news')
-    time.sleep(6)  # hard wait for JS-rendered content to appear
+    time.sleep(6)
 
     links = driver.find_elements(By.TAG_NAME, 'a')
 
@@ -143,8 +167,7 @@ def check_gec(driver, memory):
     updates_found = False
     for link_url in latest_five:
         already_seen = link_url in memory
-        print(f"(debug) candidate URL='{link_url}' | already_in_memory={already_seen}")
-
+        
         if not already_seen:
             raw_filename = link_url.split('/')[-1]
             clean_title = re.sub(r'^\d+_', '', raw_filename).replace('.pdf', '').replace('_', ' ')
@@ -156,8 +179,6 @@ def check_gec(driver, memory):
                 if saved:
                     memory.append(link_url)
                     updates_found = True
-                else:
-                    print(f"(debug) Save failed — NOT adding to in-run memory either, so this will be retried next run")
             else:
                 print(f"(debug) NOT saving to memory since delivery failed — will retry next run: {clean_title}")
 
@@ -189,16 +210,14 @@ def run_once():
                 'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
             })
         except Exception as e:
-            print(f"(debug) Could not apply webdriver-masking script (non-fatal): {e}")
+            pass
 
         try:
             current_memory = load_memory()
         except Exception as e:
-            print(f"(debug) FATAL: could not load memory this run — ABORTING checks entirely "
-                  f"to avoid treating everything as new: {e}")
+            print(f"(debug) FATAL: could not load memory this run: {e}")
             return
 
-        # Notice KTU no longer uses the 'browser' object!
         check_ktu(current_memory)
         check_gec(browser, current_memory)
         
