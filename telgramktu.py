@@ -32,20 +32,18 @@ def send_telegram_message(text):
 
 
 def load_memory():
-    """Reads the list of already-seen items from the Google Sheet (via Apps Script GET)."""
-    try:
-        resp = requests.get(SHEET_URL, timeout=20)
-        resp.raise_for_status()
-        data = resp.json()
-        # data is a list of first-column values from the sheet; clean it up
-        mem = [str(item).strip() for item in data if item]
-        print(f"(debug) Loaded {len(mem)} items from memory sheet")
-        if mem:
-            print(f"(debug) Sample of loaded memory (first 3): {mem[:3]}")
-        return mem
-    except Exception as e:
-        print(f"(debug) COULD NOT load memory from Sheet — treating as EMPTY this run: {e}")
-        return []
+    """Reads the list of already-seen items from the Google Sheet (via Apps Script GET).
+    Raises on failure instead of returning an empty list — treating a failed/slow
+    read as 'nothing has ever been seen' is what caused a mass-resend snowball
+    (empty memory -> everything looks new -> sheet grows -> reads get slower -> repeat)."""
+    resp = requests.get(SHEET_URL, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    mem = [str(item).strip() for item in data if item]
+    print(f"(debug) Loaded {len(mem)} items from memory sheet")
+    if mem:
+        print(f"(debug) Sample of loaded memory (first 3): {mem[:3]}")
+    return mem
 
 
 def save_memory(item):
@@ -172,7 +170,14 @@ def run_once():
     browser = None
     try:
         browser = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-        current_memory = load_memory()
+
+        try:
+            current_memory = load_memory()
+        except Exception as e:
+            print(f"(debug) FATAL: could not load memory this run — ABORTING checks entirely "
+                  f"to avoid treating everything as new: {e}")
+            return
+
         check_ktu(browser, current_memory)
         check_gec(browser, current_memory)
     except Exception as e:
