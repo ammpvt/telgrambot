@@ -1,4 +1,3 @@
 requests
 selenium
-webdriver-manager
-beautifulsoup4
+undetected-chromedriver
