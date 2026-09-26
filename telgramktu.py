@@ -2,6 +2,7 @@ import os
 import re
 import time
 import requests
+import subprocess
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -41,6 +42,19 @@ def save_memory(item):
     except Exception as e:
         print(f"(debug) COULD NOT save to Sheet: {e}")
         return False
+
+def get_chrome_major_version():
+    """Dynamically finds the installed Chrome major version on the Linux server."""
+    try:
+        process = subprocess.run(['google-chrome', '--version'], capture_output=True, text=True)
+        # Output looks like: "Google Chrome 153.0.x.x"
+        version_str = process.stdout.strip()
+        match = re.search(r'\d+', version_str)
+        if match:
+            return int(match.group())
+    except Exception as e:
+        print(f"(debug) Could not dynamically find Chrome version: {e}")
+    return None
 
 def check_ktu(driver, memory):
     print("\n--- Checking KTU Announcements ---")
@@ -125,14 +139,19 @@ def check_gec(driver, memory):
 
 def run_once():
     options = uc.ChromeOptions()
-    # CRITICAL: We DO NOT use --headless anymore. The Xvfb wrapper handles the display.
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     
     driver = None
     try:
-        # undetected_chromedriver dynamically patches the browser fingerprint
-        driver = uc.Chrome(options=options)
+        # Dynamically match driver to GitHub's installed Chrome version
+        chrome_version = get_chrome_major_version()
+        print(f"(debug) Dynamic Chrome version detected: {chrome_version}")
+        
+        if chrome_version:
+            driver = uc.Chrome(options=options, version_main=chrome_version)
+        else:
+            driver = uc.Chrome(options=options) # Fallback
 
         try:
             current_memory = load_memory()
