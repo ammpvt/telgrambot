@@ -2,6 +2,7 @@ import os
 import re
 import time
 import requests
+from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -20,9 +21,6 @@ def send_telegram_message(text):
         resp = requests.post(api_url, data={'chat_id': CHAT_ID, 'text': text, 'parse_mode': 'HTML'}, timeout=15)
         result = resp.json()
         if not result.get('ok'):
-            # Telegram responded but rejected the message (e.g. bad HTML, blocked bot,
-            # wrong chat_id). This does NOT raise an exception on its own, so without
-            # this check it fails silently while the item still gets marked as "sent".
             print(f"(debug) Telegram REJECTED message: {result}")
             return False
         return True
@@ -32,10 +30,6 @@ def send_telegram_message(text):
 
 
 def load_memory():
-    """Reads the list of already-seen items from the Google Sheet (via Apps Script GET).
-    Raises on failure instead of returning an empty list — treating a failed/slow
-    read as 'nothing has ever been seen' is what caused a mass-resend snowball
-    (empty memory -> everything looks new -> sheet grows -> reads get slower -> repeat)."""
     resp = requests.get(SHEET_URL, timeout=30)
     resp.raise_for_status()
     data = resp.json()
@@ -47,7 +41,6 @@ def load_memory():
 
 
 def save_memory(item):
-    """Appends a new item to the Google Sheet (via Apps Script POST). Returns True if the write appears to have succeeded."""
     try:
         resp = requests.post(SHEET_URL, data={'item': item}, timeout=20)
         resp.raise_for_status()
@@ -58,56 +51,57 @@ def save_memory(item):
         return False
 
 
-def check_ktu(driver, memory):
-    print("\n--- Checking KTU Announcements ---")
-    driver.get('https://ktu.edu.in/Menu/announcements')
-
-    # Actively wait (up to 20s) for real announcement content to render,
-    # instead of a blind fixed sleep — gives slow JS renders more of a
-    # chance, while still failing fast if content genuinely never appears.
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
+def check_ktu(memory):
+    print("\n--- Checking KTU Announcements (via requests) ---")
+    
+    # Heavily spoofed headers to look like a standard desktop Chrome browser
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1'
+    }
+    
     try:
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "h6.f-w-bold"))
-        )
-    except Exception:
-        print("(debug) No h6.f-w-bold appeared within 20s wait")
-
-    print(f"(debug) KTU page title: {driver.title!r}")
-    try:
-        body_text_len = len(driver.find_element(By.TAG_NAME, 'body').text)
-        print(f"(debug) KTU page body text length: {body_text_len} characters")
+        resp = requests.get('https://ktu.edu.in/Menu/announcements', headers=headers, timeout=20)
+        print(f"(debug) KTU HTTP status: {resp.status_code}")
+        html_content = resp.text
+        print(f"(debug) KTU HTML length: {len(html_content)} characters")
+        
+        # If the length is still ~214 characters, we are hitting a WAF IP block.
+        if len(html_content) < 1000:
+            print(f"(debug) Page seems too small, likely blocked by firewall. Content snippet: {html_content[:300]}")
+            return
+            
     except Exception as e:
-        print(f"(debug) Could not read page body at all: {e}")
+        print(f"(debug) KTU request failed: {e}")
+        return
 
-    # Each announcement is one div.col-sm-11, containing an h6 title and a
-    # themed date div. This is far more reliable than the old approach of
-    # looping over buttons and guessing a title by climbing up the DOM —
-    # that broke on cards with multiple buttons (counted the same card
-    # 2-3 times) and sometimes grabbed the wrong "first line" as the title.
-    cards = driver.find_elements(By.CSS_SELECTOR, "div.col-sm-11")
-    print(f"(debug) {len(cards)} announcement cards found on KTU page")
+    # Parse the raw HTML directly without a browser
+    soup = BeautifulSoup(html_content, 'html.parser')
+    cards = soup.select("div.col-sm-11")
+    print(f"(debug) {len(cards)} announcement cards found on KTU page via requests")
+    
     updates_found = False
 
     for card in cards:
         try:
-            title_el = card.find_elements(By.CSS_SELECTOR, "h6.f-w-bold")
+            title_el = card.select_one("h6.f-w-bold")
             if not title_el:
-                continue  # not every col-sm-11 on the page is an announcement card
-            title = title_el[0].text.strip()
+                continue
+            title = title_el.get_text(strip=True)
 
             date_text = ""
-            date_el = card.find_elements(By.CSS_SELECTOR, "div.font-14.text-theme.h6.m-t-10.f-w-bold")
+            date_el = card.select_one("div.font-14.text-theme.h6.m-t-10.f-w-bold")
             if date_el:
-                date_text = date_el[0].text.strip()
+                date_text = date_el.get_text(strip=True)
 
-            # Composite key: date + heading, far more robust than title alone.
             key = f"{date_text} | {title}" if date_text else title
-
-            # Backward-compatible check: recognize items saved under the OLD
-            # title-only memory format too, so switching key formats doesn't
-            # cause everything currently on the page to look "new" again.
             already_seen = (key in memory) or (title in memory)
             print(f"(debug) candidate: date='{date_text}' title='{title}' | already_in_memory={already_seen}")
 
@@ -137,17 +131,12 @@ def check_gec(driver, memory):
 
     links = driver.find_elements(By.TAG_NAME, 'a')
 
-    # Collect only PDF links, preserving the order they appear on the page
-    # (the site lists newest first, so position in this list = recency)
     pdf_links = []
     for a in links:
         href = a.get_attribute('href')
         if href and '.pdf' in href.lower():
             pdf_links.append(href)
 
-    # Only ever consider the most recent 5 items on the page.
-    # We deliberately never look further down the list, so there's no
-    # older backlog to slowly drain out over future runs.
     latest_five = pdf_links[:5]
     print(f"(debug) {len(pdf_links)} total PDF links on page, checking latest {len(latest_five)}")
 
@@ -185,10 +174,6 @@ def run_once():
     options.add_argument('--ignore-certificate-errors')
     options.add_experimental_option('excludeSwitches', ['enable-logging', 'enable-automation'])
     options.add_experimental_option('useAutomationExtension', False)
-    # Selenium's default headless Chrome has a well-known automation fingerprint
-    # (navigator.webdriver = true, sometimes "HeadlessChrome" in the user-agent).
-    # Some sites serve a stripped-down/blocked page when they detect this. These
-    # two lines make the browser look like an ordinary desktop Chrome instead.
     options.add_argument('--disable-blink-features=AutomationControlled')
     options.add_argument(
         'user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -199,8 +184,6 @@ def run_once():
     try:
         browser = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 
-        # Further hide the automation fingerprint: Selenium normally exposes
-        # navigator.webdriver = true, which some sites check for directly.
         try:
             browser.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
                 'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
@@ -215,8 +198,10 @@ def run_once():
                   f"to avoid treating everything as new: {e}")
             return
 
-        check_ktu(browser, current_memory)
+        # Notice KTU no longer uses the 'browser' object!
+        check_ktu(current_memory)
         check_gec(browser, current_memory)
+        
     except Exception as e:
         print(f"An error occurred: {e}")
     finally:
