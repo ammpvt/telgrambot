@@ -145,23 +145,24 @@ def run_once():
     options.add_argument('--disable-software-rasterizer')
     options.add_argument('--window-size=1920,1080')
     
-    # Command line flags
-    options.add_argument('--ignore-certificate-errors')
-    options.add_argument('--ignore-ssl-errors=yes')
-    options.add_argument('--allow-running-insecure-content')
-    
-   
-    options.set_capability('acceptInsecureCerts', True)
     driver = None
     try:
         # Dynamically match driver to GitHub's installed Chrome version
         chrome_version = get_chrome_major_version()
-        print(f"(debug) Dynamic Chrome version detected: {chrome_version}")
         
         if chrome_version:
             driver = uc.Chrome(options=options, version_main=chrome_version)
         else:
             driver = uc.Chrome(options=options) # Fallback
+
+        # --- Force Chrome to ignore SSL errors internally via DevTools Protocol ---
+        try:
+            driver.execute_cdp_cmd('Security.enable', {})
+            driver.execute_cdp_cmd('Security.setIgnoreCertificateErrors', {'ignore': True})
+            print("(debug) CDP SSL bypass applied successfully.")
+        except Exception as e:
+            print(f"(debug) CDP SSL bypass failed: {e}")
+        # -------------------------------------------------------------------------
 
         try:
             current_memory = load_memory()
@@ -177,7 +178,6 @@ def run_once():
     finally:
         if driver:
             driver.quit()
-
 if __name__ == "__main__":
     print("Bot check started (Virtual Display stealth mode).")
     run_once()
