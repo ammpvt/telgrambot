@@ -144,6 +144,8 @@ def run_once():
     options.add_argument('--disable-gpu')
     options.add_argument('--disable-software-rasterizer')
     options.add_argument('--window-size=1920,1080')
+    options.add_argument('--ignore-certificate-errors')
+    options.add_argument('--ignore-ssl-errors=yes')
     driver = None
     try:
         # Dynamically match driver to GitHub's installed Chrome version
